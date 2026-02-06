@@ -22,7 +22,7 @@ describe("API Calculadora", () => {
     { rota: "/divisao", op: (a, b) => a / b },
   ]
 
-  operacoes.forEach(({ rota, op }) => {
+ operacoes.forEach(({ rota, op }) => {
     it(`operacao ${rota} deve calcular corretamente`, () => {
       const { a, b } = calc.base
 
@@ -33,7 +33,14 @@ describe("API Calculadora", () => {
       }).then((res) => {
         expect(res.status).to.eq(200)
         expect(res.body).to.have.property("resultado")
-        expect(Number(res.body.resultado)).to.eq(op(a, b))
+
+        // 🔴 falha controlada: só a soma quebra
+        const esperado =
+          rota === "/soma"
+            ? op(a, b) + 1
+            : op(a, b)
+
+        expect(Number(res.body.resultado)).to.eq(esperado)
       })
     })
   })
