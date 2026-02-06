@@ -33,14 +33,7 @@ describe("API Calculadora", () => {
       }).then((res) => {
         expect(res.status).to.eq(200)
         expect(res.body).to.have.property("resultado")
-
-        // 🔴 falha controlada: só a soma quebra
-        const esperado =
-          rota === "/soma"
-            ? op(a, b) + 1
-            : op(a, b)
-
-        expect(Number(res.body.resultado)).to.eq(esperado)
+        expect(Number(res.body.resultado)).to.eq(op(a, b))
       })
     })
   })
