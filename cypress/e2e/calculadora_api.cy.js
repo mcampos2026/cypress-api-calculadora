@@ -22,7 +22,7 @@ describe("API Calculadora", () => {
     { rota: "/divisao", op: (a, b) => a / b },
   ]
 
-  operacoes.forEach(({ rota, op }) => {
+ operacoes.forEach(({ rota, op }) => {
     it(`operacao ${rota} deve calcular corretamente`, () => {
       const { a, b } = calc.base
 
