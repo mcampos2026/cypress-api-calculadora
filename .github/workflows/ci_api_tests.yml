@@ -26,3 +26,26 @@ jobs:
 
       - name: Run API tests
         run: npm test
+
+              - name: Comment Jira with GitHub Actions run link
+        if: always()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_ISSUE_KEY: KAN-4
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_JOB: api_tests
+          GH_STATUS: ${{ job.status }}
+        run: |
+          payload=$(printf '{"body":{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"Evidência CI/CD (%s / %s): %s | Run: %s"}]}]}}' \
+            "$GH_WORKFLOW" "$GH_JOB" "$GH_STATUS" "$GH_RUN_URL")
+
+          curl -sS -X POST \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY/comment"
+
