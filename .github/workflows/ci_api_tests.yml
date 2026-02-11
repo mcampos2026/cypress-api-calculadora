@@ -10,7 +10,7 @@ jobs:
   api_tests:
     runs-on: ubuntu-latest
     env:
-      CYPRESS_BASE_URL: "https://dev-calc.azurewebsites.net"
+      CYPRESS_BASE_URL: ${{ vars.CYPRESS_BASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
