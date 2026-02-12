@@ -1,16 +1,18 @@
 name: ci_api_tests
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
 
 jobs:
   api_tests:
     runs-on: ubuntu-latest
+
     env:
       CYPRESS_BASE_URL: "https://dev-calc.azurewebsites.net"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,3 +28,35 @@ jobs:
 
       - name: Run API tests
         run: npm test
+
+      # Comenta no Jira com o link do run (sempre, mesmo se falhar)
+      - name: Comment Jira with GitHub Actions run link
+        if: always() && github.event_name == 'pull_request'
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+
+          echo "PR_TITLE=$PR_TITLE"
+          ISSUE_KEY=$(echo "$PR_TITLE" | grep -oE '[A-Z]+-[0-9]+' | head -n 1 || true)
+
+          if [ -z "$ISSUE_KEY" ]; then
+            echo "Nao encontrei ISSUE KEY no titulo do PR (ex: KAN-4). Pulando comentario no Jira."
+            exit 0
+          fi
+
+          COMMENT_TEXT="Evidencia CI: workflow ci_api_tests finalizou. Link do run: $RUN_URL"
+          JSON_BODY=$(printf '{"body":"%s"}' "$(echo "$COMMENT_TEXT" | sed 's/"/\\"/g')")
+
+          curl -sS -X POST \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            --data "$JSON_BODY" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/comment"
+
+          echo "Comentado no Jira: $ISSUE_KEY"
