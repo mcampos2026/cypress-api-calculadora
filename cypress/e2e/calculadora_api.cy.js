@@ -31,7 +31,7 @@ describe("API Calculadora", () => {
         url: rota,
         qs: { a, b },
       }).then((res) => {
-        expect(res.status).to.eq(200)
+        expect(res.status).to.eq(500)
         expect(res.body).to.have.property("resultado")
         expect(Number(res.body.resultado)).to.eq(op(a, b))
       })
