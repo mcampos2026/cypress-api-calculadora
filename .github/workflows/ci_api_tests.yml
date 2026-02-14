@@ -9,8 +9,10 @@ on:
 jobs:
   api_tests:
     runs-on: ubuntu-latest
+
     env:
       CYPRESS_BASE_URL: "https://dev-calc.azurewebsites.net"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,3 +28,74 @@ jobs:
 
       - name: Run API tests
         run: npm test
+
+      # Sempre sobe artifacts (mesmo se falhar)
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-artifacts
+          path: |
+            cypress/screenshots/**
+            cypress/videos/**
+            cypress/results/**
+            mochawesome-report/**
+            reports/**
+            cypress/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Instala jq apenas se houver falha
+      - name: Install jq
+        if: failure()
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # Cria issue no Jira se falhar
+      - name: Create Jira issue (CI Failure) on failure
+        if: failure()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+
+          SUMMARY="[CI] Falha no pipeline - ${GH_REF_NAME}"
+
+          DESCRIPTION=$(cat <<EOF
+          Falha detectada no GitHub Actions.
+
+          - Run: ${GH_RUN_URL}
+          - Repo: ${GITHUB_REPOSITORY}
+          - Branch: ${GH_REF_NAME}
+          - Commit: ${GH_SHA}
+
+          Evidências:
+          - Abrir o link do Run
+          - Baixar artifact: cypress-artifacts
+          EOF
+          )
+
+          payload=$(jq -n \
+            --arg key "$JIRA_PROJECT_KEY" \
+            --arg summary "$SUMMARY" \
+            --arg desc "$DESCRIPTION" \
+            '{
+              fields: {
+                project: { key: $key },
+                summary: $summary,
+                description: $desc,
+                issuetype: { name: "CI Failure" }
+              }
+            }')
+
+          curl -sS -X POST \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue" \
+            -d "$payload"
