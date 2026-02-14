@@ -29,7 +29,6 @@ jobs:
       - name: Run API tests
         run: npm test
 
-      # Sempre sobe artifacts (mesmo se falhar)
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -45,17 +44,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Instala jq apenas se houver falha
       - name: Install jq
         if: failure()
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # Cria issue no Jira se falhar
       - name: Create Jira issue (CI Failure) on failure
         if: failure()
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
           GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -65,7 +62,6 @@ jobs:
           set -e
 
           SUMMARY="[CI] Falha no pipeline - ${GH_REF_NAME}"
-
           DESCRIPTION=$(cat <<EOF
           Falha detectada no GitHub Actions.
 
@@ -88,13 +84,24 @@ jobs:
               fields: {
                 project: { key: $key },
                 summary: $summary,
-                description: $desc,
+                description: {
+                  type: "doc",
+                  version: 1,
+                  content: [
+                    {
+                      type: "paragraph",
+                      content: [
+                        { type: "text", text: $desc }
+                      ]
+                    }
+                  ]
+                },
                 issuetype: { name: "CI Failure" }
               }
             }')
 
           curl -sS -X POST \
-            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue" \
