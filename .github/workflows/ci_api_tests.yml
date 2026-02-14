@@ -1,6 +1,7 @@
 name: ci_api_tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -106,3 +107,4 @@ jobs:
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue" \
             -d "$payload"
+
