@@ -97,7 +97,7 @@ jobs:
                     }
                   ]
                 },
-                issuetype: { name: "CI Failure" }
+                issuetype: { name: "Task" }
               }
             }')
 
