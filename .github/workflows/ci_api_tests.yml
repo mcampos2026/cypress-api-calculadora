@@ -52,7 +52,7 @@ jobs:
         if: failure()
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
           GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -101,7 +101,7 @@ jobs:
             }')
 
           curl -sS -X POST \
-            -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue" \
