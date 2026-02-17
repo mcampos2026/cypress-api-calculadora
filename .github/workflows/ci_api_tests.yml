@@ -60,7 +60,7 @@ jobs:
           run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
 
-          zip -r evidence.zip evidence >/dev/null
+          zip -r "evidence-${GITHUB_RUN_ID}.zip" evidence >/dev/null
 
       - name: Upload test artifacts
         if: always()
@@ -68,7 +68,7 @@ jobs:
         with:
           name: cypress-artifacts
           path: |
-            evidence.zip
+            evidence-*.zip
             evidence/**
             cypress/screenshots/**
             cypress/videos/**
@@ -144,7 +144,13 @@ jobs:
             -d "$payload")
 
           ISSUE_KEY_CREATED=$(echo "$RESP" | jq -r '.key')
+          if [ -z "$ISSUE_KEY_CREATED" ] || [ "$ISSUE_KEY_CREATED" = "null" ]; then
+            echo "Erro ao criar issue. Resposta Jira: $RESP"
+            exit 1
+          fi
+
           echo "issueKey=$ISSUE_KEY_CREATED" >> "$GITHUB_OUTPUT"
+          echo "Issue criada: $ISSUE_KEY_CREATED"
 
       - name: Attach evidence to Jira (failure)
         if: failure()
@@ -156,75 +162,85 @@ jobs:
         shell: bash
         run: |
           set -e
+          ZIP_FILE="evidence-${GITHUB_RUN_ID}.zip"
+          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          # Anexa zip
-          if [ -f evidence.zip ]; then
-            curl -sS -X POST \
-              -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
-              -H "X-Atlassian-Token: no-check" \
-              -F "file=@evidence.zip" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
-              >/dev/null
-          fi
+          ATTACH_JSON="$(curl -sS -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}?fields=attachment,labels")"
 
-          # Anexa vídeos (mp4)
-          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
-            for f in cypress/videos/*.mp4; do
-              echo "Anexando video: $f"
+          # Label ci-failure (sem duplicar)
+          LABELS_UPDATED="$(echo "$ATTACH_JSON" | jq -c '
+            (.fields.labels // []) as $l
+            | (if ($l | index("ci-failure")) then $l else ($l + ["ci-failure"]) end)
+          ')"
+
+          curl -sS -X PUT \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}" \
+            -d "$(jq -n --argjson labels "$LABELS_UPDATED" '{fields:{labels:$labels}}')" \
+            >/dev/null
+
+          has_attachment () {
+            local filename="$1"
+            echo "$ATTACH_JSON" | jq -e --arg fn "$filename" '.fields.attachment[]? | select(.filename==$fn)' >/dev/null 2>&1
+          }
+
+          # Anexa zip (sem duplicar)
+          if [ -f "$ZIP_FILE" ]; then
+            if has_attachment "$(basename "$ZIP_FILE")"; then
+              echo "Zip já anexado no Jira: $ZIP_FILE (skip)"
+            else
               curl -sS -X POST \
                 -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
                 -H "X-Atlassian-Token: no-check" \
-                -F "file=@${f}" \
+                -F "file=@${ZIP_FILE}" \
                 "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
                 >/dev/null
+            fi
+          fi
+
+          # Anexa vídeos mp4 (nomeados com run_id, sem duplicar)
+          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
+            for f in cypress/videos/*.mp4; do
+              base="$(basename "$f" .mp4)"
+              tmp="${base}-${GITHUB_RUN_ID}.mp4"
+              cp "$f" "$tmp"
+
+              if has_attachment "$tmp"; then
+                echo "Video já anexado no Jira: $tmp (skip)"
+              else
+                echo "Anexando video: $tmp"
+                curl -sS -X POST \
+                  -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                  -H "X-Atlassian-Token: no-check" \
+                  -F "file=@${tmp}" \
+                  "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+                  >/dev/null
+              fi
             done
           else
             echo "Nenhum video mp4 encontrado em cypress/videos"
           fi
 
-      # ========================
-      # SUCCESS FLOW
-      # ========================
-      - name: Attach evidence + comment to Jira issue (success)
-        if: success()
+          echo "Falha registrada em ${ISSUE_KEY} | Run: ${GH_RUN_URL}"
+
+      - name: Comment Jira issue (failure)
+        if: failure()
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          ISSUE_KEY: ${{ steps.jira_key.outputs.issueKey }}
+          ISSUE_KEY: ${{ steps.jira_issue_fail.outputs.issueKey }}
         shell: bash
         run: |
           set -e
           GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          # Anexa zip
-          if [ -f evidence.zip ]; then
-            curl -sS -X POST \
-              -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
-              -H "X-Atlassian-Token: no-check" \
-              -F "file=@evidence.zip" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
-              >/dev/null
-          fi
-
-          # Anexa vídeos (mp4)
-          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
-            for f in cypress/videos/*.mp4; do
-              echo "Anexando video: $f"
-              curl -sS -X POST \
-                -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
-                -H "X-Atlassian-Token: no-check" \
-                -F "file=@${f}" \
-                "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
-                >/dev/null
-            done
-          else
-            echo "Nenhum video mp4 encontrado em cypress/videos"
-          fi
-
-          # Comentário
           COMMENT=$(jq -n \
-            --arg txt "CI SUCESSO\nRun: ${GH_RUN_URL}\nRepo: ${GITHUB_REPOSITORY}\nBranch: ${GITHUB_REF_NAME}\nCommit: ${GITHUB_SHA}" \
+            --arg txt "❌ CI FALHOU\nRun: ${GH_RUN_URL}\nArtifact: cypress-artifacts\nRepo: ${GITHUB_REPOSITORY}\nBranch: ${GITHUB_REF_NAME}\nCommit: ${GITHUB_SHA}" \
             '{
               body: {
                 type: "doc",
@@ -242,3 +258,124 @@ jobs:
             "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
             -d "$COMMENT" \
             >/dev/null
+
+      # ========================
+      # SUCCESS FLOW
+      # ========================
+      - name: Attach evidence + comment to Jira issue (success)
+        if: success()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.jira_key.outputs.issueKey }}
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="evidence-${GITHUB_RUN_ID}.zip"
+          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          ISSUE_JSON="$(curl -sS -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}?fields=attachment,labels")"
+
+          # Label ci-success (sem duplicar)
+          LABELS_UPDATED="$(echo "$ISSUE_JSON" | jq -c '
+            (.fields.labels // []) as $l
+            | (if ($l | index("ci-success")) then $l else ($l + ["ci-success"]) end)
+          ')"
+
+          curl -sS -X PUT \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}" \
+            -d "$(jq -n --argjson labels "$LABELS_UPDATED" '{fields:{labels:$labels}}')" \
+            >/dev/null
+
+          has_attachment () {
+            local filename="$1"
+            echo "$ISSUE_JSON" | jq -e --arg fn "$filename" '.fields.attachment[]? | select(.filename==$fn)' >/dev/null 2>&1
+          }
+
+          # Anexa zip (sem duplicar)
+          if [ -f "$ZIP_FILE" ]; then
+            if has_attachment "$(basename "$ZIP_FILE")"; then
+              echo "Zip já anexado no Jira: $ZIP_FILE (skip)"
+            else
+              curl -sS -X POST \
+                -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                -H "X-Atlassian-Token: no-check" \
+                -F "file=@${ZIP_FILE}" \
+                "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+                >/dev/null
+            fi
+          fi
+
+          # Anexa vídeos mp4 (nomeados com run_id, sem duplicar)
+          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
+            for f in cypress/videos/*.mp4; do
+              base="$(basename "$f" .mp4)"
+              tmp="${base}-${GITHUB_RUN_ID}.mp4"
+              cp "$f" "$tmp"
+
+              if has_attachment "$tmp"; then
+                echo "Video já anexado no Jira: $tmp (skip)"
+              else
+                echo "Anexando video: $tmp"
+                curl -sS -X POST \
+                  -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                  -H "X-Atlassian-Token: no-check" \
+                  -F "file=@${tmp}" \
+                  "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+                  >/dev/null
+              fi
+            done
+          else
+            echo "Nenhum video mp4 encontrado em cypress/videos"
+          fi
+
+          # Comentário
+          COMMENT=$(jq -n \
+            --arg txt "✅ CI SUCESSO\nRun: ${GH_RUN_URL}\nRepo: ${GITHUB_REPOSITORY}\nBranch: ${GITHUB_REF_NAME}\nCommit: ${GITHUB_SHA}" \
+            '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  { type: "paragraph", content: [ { type: "text", text: $txt } ] }
+                ]
+              }
+            }')
+
+          curl -sS -X POST \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
+            -d "$COMMENT" \
+            >/dev/null
+
+          # Transição para Done (se existir)
+          TRANSITIONS="$(curl -sS -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/transitions")"
+
+          TRANSITION_ID="$(echo "$TRANSITIONS" | jq -r '
+            .transitions[]
+            | select(.name == "Done")
+            | .id
+          ' | head -n1)"
+
+          if [ -n "$TRANSITION_ID" ] && [ "$TRANSITION_ID" != "null" ]; then
+            curl -sS -X POST \
+              -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/transitions" \
+              -d "$(jq -n --arg id "$TRANSITION_ID" '{transition:{id:$id}}')" \
+              >/dev/null
+            echo "Issue transicionada para Done"
+          else
+            echo "Transição Done não encontrada. Mantendo status atual."
+          fi
