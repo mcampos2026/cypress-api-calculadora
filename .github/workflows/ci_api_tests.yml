@@ -90,7 +90,7 @@ jobs:
 
           ISSUE_KEY="$(echo "$BRANCH" | grep -Eo '[A-Z][A-Z0-9]+-[0-9]+' | head -n1 || true)"
           if [ -z "$ISSUE_KEY" ]; then
-            echo "Não encontrei issueKey no nome da branch. Use padrão tipo CAA-6-..."
+            echo "Não encontrei issueKey no nome da branch."
             exit 1
           fi
 
@@ -101,7 +101,10 @@ jobs:
         if: always()
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Create Jira issue (CI Failure) on failure
+      # ========================
+      # FAILURE FLOW
+      # ========================
+      - name: Create Jira issue (CI Failure)
         if: failure()
         id: jira_issue_fail
         env:
@@ -113,27 +116,11 @@ jobs:
         run: |
           set -e
           GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          GH_REF_NAME="${GITHUB_REF_NAME}"
-
-          SUMMARY="[CI] Falha no pipeline - ${GH_REF_NAME}"
-          DESCRIPTION=$(cat <<EOF
-          Falha detectada no GitHub Actions.
-
-          - Run: ${GH_RUN_URL}
-          - Repo: ${GITHUB_REPOSITORY}
-          - Branch: ${GH_REF_NAME}
-          - Commit: ${GITHUB_SHA}
-
-          Evidências:
-          - Ver anexos da issue (evidence.zip)
-          - Artifact no GitHub: cypress-artifacts
-          EOF
-          )
 
           payload=$(jq -n \
             --arg key "$JIRA_PROJECT_KEY" \
-            --arg summary "$SUMMARY" \
-            --arg desc "$DESCRIPTION" \
+            --arg summary "[CI] Falha no pipeline - ${GITHUB_REF_NAME}" \
+            --arg desc "Falha detectada.\nRun: ${GH_RUN_URL}\nRepo: ${GITHUB_REPOSITORY}\nBranch: ${GITHUB_REF_NAME}\nCommit: ${GITHUB_SHA}" \
             '{
               fields: {
                 project: { key: $key },
@@ -142,33 +129,22 @@ jobs:
                   type: "doc",
                   version: 1,
                   content: [
-                    {
-                      type: "paragraph",
-                      content: [
-                        { type: "text", text: $desc }
-                      ]
-                    }
+                    { type: "paragraph", content: [ { type: "text", text: $desc } ] }
                   ]
                 },
                 issuetype: { name: "Task" }
               }
             }')
 
-          RESP="$(curl -sS -X POST \
+          RESP=$(curl -sS -X POST \
             -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue" \
-            -d "$payload")"
+            -d "$payload")
 
-          ISSUE_KEY_CREATED="$(echo "$RESP" | jq -r '.key')"
-          if [ -z "$ISSUE_KEY_CREATED" ] || [ "$ISSUE_KEY_CREATED" = "null" ]; then
-            echo "Erro ao criar issue. Resposta Jira: $RESP"
-            exit 1
-          fi
-
+          ISSUE_KEY_CREATED=$(echo "$RESP" | jq -r '.key')
           echo "issueKey=$ISSUE_KEY_CREATED" >> "$GITHUB_OUTPUT"
-          echo "Issue criada: $ISSUE_KEY_CREATED"
 
       - name: Attach evidence to Jira (failure)
         if: failure()
@@ -180,55 +156,35 @@ jobs:
         shell: bash
         run: |
           set -e
-          if [ ! -f evidence.zip ]; then
-            echo "evidence.zip não encontrado, nada para anexar."
-            exit 0
+
+          # Anexa zip
+          if [ -f evidence.zip ]; then
+            curl -sS -X POST \
+              -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "X-Atlassian-Token: no-check" \
+              -F "file=@evidence.zip" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+              >/dev/null
           fi
 
-          curl -sS -X POST \
-            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
-            -H "X-Atlassian-Token: no-check" \
-            -F "file=@evidence.zip" \
-            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
-            >/dev/null
+          # Anexa vídeos (mp4)
+          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
+            for f in cypress/videos/*.mp4; do
+              echo "Anexando video: $f"
+              curl -sS -X POST \
+                -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                -H "X-Atlassian-Token: no-check" \
+                -F "file=@${f}" \
+                "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+                >/dev/null
+            done
+          else
+            echo "Nenhum video mp4 encontrado em cypress/videos"
+          fi
 
-          echo "Anexo enviado para ${ISSUE_KEY}"
-
-      - name: Comment Jira issue (failure)
-        if: failure()
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          ISSUE_KEY: ${{ steps.jira_issue_fail.outputs.issueKey }}
-        shell: bash
-        run: |
-          set -e
-          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-          COMMENT="$(jq -n \
-            --arg txt "❌ CI FALHOU\nRun: ${GH_RUN_URL}\nArtifact: cypress-artifacts (evidence.zip anexado)\nRepo: ${GITHUB_REPOSITORY}\nRef: ${GITHUB_REF}\nSHA: ${GITHUB_SHA}" \
-            '{
-              body: {
-                type: "doc",
-                version: 1,
-                content: [
-                  { type: "paragraph", content: [ { type: "text", text: $txt } ] }
-                ]
-              }
-            }'
-          )"
-
-          curl -sS -X POST \
-            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/json" \
-            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
-            --data "$COMMENT" \
-            >/dev/null
-
-          echo "Comentário enviado para ${ISSUE_KEY}"
-
+      # ========================
+      # SUCCESS FLOW
+      # ========================
       - name: Attach evidence + comment to Jira issue (success)
         if: success()
         env:
@@ -241,6 +197,7 @@ jobs:
           set -e
           GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
+          # Anexa zip
           if [ -f evidence.zip ]; then
             curl -sS -X POST \
               -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
@@ -250,8 +207,24 @@ jobs:
               >/dev/null
           fi
 
-          COMMENT="$(jq -n \
-            --arg txt "✅ CI SUCESSO\nRun: ${GH_RUN_URL}\nArtifact: cypress-artifacts (evidence.zip anexado)\nRepo: ${GITHUB_REPOSITORY}\nRef: ${GITHUB_REF}\nSHA: ${GITHUB_SHA}" \
+          # Anexa vídeos (mp4)
+          if ls cypress/videos/*.mp4 >/dev/null 2>&1; then
+            for f in cypress/videos/*.mp4; do
+              echo "Anexando video: $f"
+              curl -sS -X POST \
+                -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                -H "X-Atlassian-Token: no-check" \
+                -F "file=@${f}" \
+                "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+                >/dev/null
+            done
+          else
+            echo "Nenhum video mp4 encontrado em cypress/videos"
+          fi
+
+          # Comentário
+          COMMENT=$(jq -n \
+            --arg txt "CI SUCESSO\nRun: ${GH_RUN_URL}\nRepo: ${GITHUB_REPOSITORY}\nBranch: ${GITHUB_REF_NAME}\nCommit: ${GITHUB_SHA}" \
             '{
               body: {
                 type: "doc",
@@ -260,15 +233,12 @@ jobs:
                   { type: "paragraph", content: [ { type: "text", text: $txt } ] }
                 ]
               }
-            }'
-          )"
+            }')
 
           curl -sS -X POST \
             -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
-            --data "$COMMENT" \
+            -d "$COMMENT" \
             >/dev/null
-
-          echo "Sucesso registrado em ${ISSUE_KEY}"
