@@ -3,9 +3,13 @@ name: ci_api_tests
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - "feature/**"
+      - "CAA-*"
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
   api_tests:
@@ -30,12 +34,42 @@ jobs:
       - name: Run API tests
         run: npm test
 
+      - name: Prepare evidence zip
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          mkdir -p evidence
+
+          [ -d cypress/screenshots ] && cp -r cypress/screenshots evidence/ || true
+          [ -d cypress/videos ] && cp -r cypress/videos evidence/ || true
+          [ -d cypress/results ] && cp -r cypress/results evidence/ || true
+          [ -d mochawesome-report ] && cp -r mochawesome-report evidence/ || true
+          [ -d reports ] && cp -r reports evidence/ || true
+          [ -d cypress/logs ] && cp -r cypress/logs evidence/ || true
+
+          cat > evidence/run.txt <<EOF
+          repo=${GITHUB_REPOSITORY}
+          workflow=${GITHUB_WORKFLOW}
+          run_id=${GITHUB_RUN_ID}
+          run_number=${GITHUB_RUN_NUMBER}
+          sha=${GITHUB_SHA}
+          ref=${GITHUB_REF}
+          head_ref=${GITHUB_HEAD_REF}
+          ref_name=${GITHUB_REF_NAME}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+          zip -r evidence.zip evidence >/dev/null
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cypress-artifacts
           path: |
+            evidence.zip
+            evidence/**
             cypress/screenshots/**
             cypress/videos/**
             cypress/results/**
@@ -45,22 +79,41 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Derive Jira issue key from branch/PR
+        if: always()
+        id: jira_key
+        shell: bash
+        run: |
+          set -e
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          echo "branch=$BRANCH"
+
+          ISSUE_KEY="$(echo "$BRANCH" | grep -Eo '[A-Z][A-Z0-9]+-[0-9]+' | head -n1 || true)"
+          if [ -z "$ISSUE_KEY" ]; then
+            echo "Não encontrei issueKey no nome da branch. Use padrão tipo CAA-6-..."
+            exit 1
+          fi
+
+          echo "issueKey=$ISSUE_KEY" >> "$GITHUB_OUTPUT"
+          echo "issueKey detectada: $ISSUE_KEY"
+
       - name: Install jq
-        if: failure()
+        if: always()
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Create Jira issue (CI Failure) on failure
         if: failure()
+        id: jira_issue_fail
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
-          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GH_SHA: ${{ github.sha }}
-          GH_REF_NAME: ${{ github.ref_name }}
+        shell: bash
         run: |
           set -e
+          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          GH_REF_NAME="${GITHUB_REF_NAME}"
 
           SUMMARY="[CI] Falha no pipeline - ${GH_REF_NAME}"
           DESCRIPTION=$(cat <<EOF
@@ -69,11 +122,11 @@ jobs:
           - Run: ${GH_RUN_URL}
           - Repo: ${GITHUB_REPOSITORY}
           - Branch: ${GH_REF_NAME}
-          - Commit: ${GH_SHA}
+          - Commit: ${GITHUB_SHA}
 
           Evidências:
-          - Abrir o link do Run
-          - Baixar artifact: cypress-artifacts
+          - Ver anexos da issue (evidence.zip)
+          - Artifact no GitHub: cypress-artifacts
           EOF
           )
 
@@ -101,10 +154,121 @@ jobs:
               }
             }')
 
-          curl -sS -X POST \
+          RESP="$(curl -sS -X POST \
             -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             "${JIRA_BASE_URL}/rest/api/3/issue" \
-            -d "$payload"
+            -d "$payload")"
 
+          ISSUE_KEY_CREATED="$(echo "$RESP" | jq -r '.key')"
+          if [ -z "$ISSUE_KEY_CREATED" ] || [ "$ISSUE_KEY_CREATED" = "null" ]; then
+            echo "Erro ao criar issue. Resposta Jira: $RESP"
+            exit 1
+          fi
+
+          echo "issueKey=$ISSUE_KEY_CREATED" >> "$GITHUB_OUTPUT"
+          echo "Issue criada: $ISSUE_KEY_CREATED"
+
+      - name: Attach evidence to Jira (failure)
+        if: failure()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.jira_issue_fail.outputs.issueKey }}
+        shell: bash
+        run: |
+          set -e
+          if [ ! -f evidence.zip ]; then
+            echo "evidence.zip não encontrado, nada para anexar."
+            exit 0
+          fi
+
+          curl -sS -X POST \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "X-Atlassian-Token: no-check" \
+            -F "file=@evidence.zip" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+            >/dev/null
+
+          echo "Anexo enviado para ${ISSUE_KEY}"
+
+      - name: Comment Jira issue (failure)
+        if: failure()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.jira_issue_fail.outputs.issueKey }}
+        shell: bash
+        run: |
+          set -e
+          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          COMMENT="$(jq -n \
+            --arg txt "❌ CI FALHOU\nRun: ${GH_RUN_URL}\nArtifact: cypress-artifacts (evidence.zip anexado)\nRepo: ${GITHUB_REPOSITORY}\nRef: ${GITHUB_REF}\nSHA: ${GITHUB_SHA}" \
+            '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  { type: "paragraph", content: [ { type: "text", text: $txt } ] }
+                ]
+              }
+            }'
+          )"
+
+          curl -sS -X POST \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
+            --data "$COMMENT" \
+            >/dev/null
+
+          echo "Comentário enviado para ${ISSUE_KEY}"
+
+      - name: Attach evidence + comment to Jira issue (success)
+        if: success()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.jira_key.outputs.issueKey }}
+        shell: bash
+        run: |
+          set -e
+          GH_RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          if [ -f evidence.zip ]; then
+            curl -sS -X POST \
+              -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "X-Atlassian-Token: no-check" \
+              -F "file=@evidence.zip" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/attachments" \
+              >/dev/null
+          fi
+
+          COMMENT="$(jq -n \
+            --arg txt "✅ CI SUCESSO\nRun: ${GH_RUN_URL}\nArtifact: cypress-artifacts (evidence.zip anexado)\nRepo: ${GITHUB_REPOSITORY}\nRef: ${GITHUB_REF}\nSHA: ${GITHUB_SHA}" \
+            '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  { type: "paragraph", content: [ { type: "text", text: $txt } ] }
+                ]
+              }
+            }'
+          )"
+
+          curl -sS -X POST \
+            -u "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${ISSUE_KEY}/comment" \
+            --data "$COMMENT" \
+            >/dev/null
+
+          echo "Sucesso registrado em ${ISSUE_KEY}"
